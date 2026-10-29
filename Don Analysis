@@ -1,0 +1,119 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+
+# --- PAGE SETUP ---
+st.set_page_config(layout="wide", page_title="15m Multi-Asset Signal Engine")
+
+ASSETS = {
+    "Gold (GC=F)": "GC=F",
+    "Bitcoin (BTC-USD)": "BTC-USD",
+    "NASDAQ 100 (NQ=F)": "NQ=F",
+    "GER40 (GDXI.F)": "GDXI.F",
+    "Dow Jones 30 (YM=F)": "YM=F"
+}
+
+st.title("🚦 Live 15-Minute Trade Signal Dashboard")
+st.caption("Automated technical algorithm scanning for trend reversals across global assets.")
+
+# --- SIDEBAR CONTROLS ---
+st.sidebar.header("🎯 Target Selector")
+selected_label = st.sidebar.selectbox("Select Asset", list(ASSETS.keys()))
+ticker = ASSETS[selected_label]
+
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Strategy Parameters")
+fast_period = st.sidebar.number_input("Fast EMA Period", value=9, min_value=2)
+slow_period = st.sidebar.number_input("Slow EMA Period", value=21, min_value=5)
+
+# --- DATA EXTRACTION & ANALYSIS ENGINE ---
+@st.cache_data(ttl=60)
+def get_signal_data(symbol, fast, slow):
+    df = yf.download(symbol, period="7d", interval="15m")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.dropna()
+    
+    if df.empty:
+        return df
+
+    # Calculate Moving Averages
+    df['EMA_Fast'] = df['Close'].ewm(span=fast, adjust=False).mean()
+    df['EMA_Slow'] = df['Close'].ewm(span=slow, adjust=False).mean()
+    
+    # 1 = Bullish Trend State, 0 = Bearish Trend State
+    df['Position'] = np.where(df['EMA_Fast'] > df['EMA_Slow'], 1, 0)
+    
+    # +1 = Buy Signal, -1 = Sell Signal
+    df['Signal'] = df['Position'].diff()
+    
+    return df
+
+data = get_signal_data(ticker, fast_period, slow_period)
+
+if not data.empty:
+    latest_candle = data.iloc[-1]
+    signals_only = data[data['Signal'] != 0].copy()
+    
+    current_trend = "🟢 BULLISH (BUY MODE)" if latest_candle['Position'] == 1 else "🔴 BEARISH (SELL MODE)"
+    last_signal_row = signals_only.iloc[-1] if not signals_only.empty else None
+    
+    # --- METRICS SYSTEM ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Live Market Price", f"${latest_candle['Close']:.2f}")
+    c2.subheader(f"Current State: {current_trend}")
+    
+    if last_signal_row is not None:
+        sig_type = "🚀 BUY" if last_signal_row['Signal'] > 0 else "💥 SELL"
+        sig_time = last_signal_row.name.strftime('%m/%d %H:%M')
+        c3.metric("Last Confirmed Signal", f"{sig_type} @ ${last_signal_row['Close']:.2f}", f"Issued: {sig_time}")
+    
+    st.markdown("---")
+    
+    # --- CHART GENERATION ---
+    fig = go.Figure()
+    
+    # Candlesticks
+    fig.add_trace(go.Candlestick(
+        x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Price"
+    ))
+    
+    # Indicators
+    fig.add_trace(go.Scatter(x=data.index, y=data['EMA_Fast'], name=f'Fast EMA ({fast_period})', line=dict(color='#00E676', width=1.3)))
+    fig.add_trace(go.Scatter(x=data.index, y=data['EMA_Slow'], name=f'Slow EMA ({slow_period})', line=dict(color='#FF1744', width=1.3)))
+    
+    # Buy Markers
+    buys = data[data['Signal'] > 0]
+    fig.add_trace(go.Scatter(
+        x=buys.index, y=buys['Low'] * 0.999, mode='markers', name='BUY SIGNAL',
+        marker=dict(symbol='triangle-up', size=14, color='#00E676', line=dict(width=2, color='white'))
+    ))
+    
+    # Sell Markers
+    sells = data[data['Signal'] < 0]
+    fig.add_trace(go.Scatter(
+        x=sells.index, y=sells['High'] * 1.001, mode='markers', name='SELL SIGNAL',
+        marker=dict(symbol='triangle-down', size=14, color='#FF1744', line=dict(width=2, color='white'))
+    ))
+    
+    fig.update_layout(
+        title=f"{selected_label} Interactive Signal Map (15-Minute)",
+        xaxis_title="Timeline", yaxis_title="Price (USD)",
+        xaxis_rangeslider_visible=False, height=600, template="plotly_dark"
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # --- SIGNAL RECAP LOG ---
+    st.subheader("📋 Recent Signal Logs")
+    if not signals_only.empty:
+        log_df = signals_only.tail(10)[['Close', 'Signal']].copy()
+        log_df['Action'] = np.where(log_df['Signal'] > 0, "🟢 BUY ENTRY", "🔴 SELL ENTRY")
+        st.dataframe(log_df[['Action', 'Close']].sort_index(ascending=False), use_container_width=True)
+    else:
+        st.info("No signal convergence triggers identified inside active database ranges.")
+else:
+    st.error("Failed to map execution frame assets. Refresh parameters pipeline configuration arrays.")
